@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package scaleguard.v1;
+
+option go_package = "github.com/karabulut18/scale-guard/internal/pb";
+
+// RateLimitService is the single gRPC service exposed by scale-guard.
+// Internal microservices call CheckRateLimit before processing each request.
+service RateLimitService {
+  // CheckRateLimit consumes one token from the caller's bucket and reports
+  // whether the request is permitted. This is the hot-path RPC — it must
+  // return in under 2ms p99.
+  rpc CheckRateLimit(CheckRateLimitRequest) returns (CheckRateLimitResponse);
+}
+
+message CheckRateLimitRequest {
+  // tenant_id identifies the owning service or team. Required.
+  string tenant_id = 1;
+
+  // client_id identifies the individual caller: API key, user ID, IP, etc. Required.
+  string client_id = 2;
+}
+
+message CheckRateLimitResponse {
+  // allowed is true if the request is within the rate limit and may proceed.
+  bool allowed = 1;
+
+  // remaining is the approximate number of tokens left in the bucket after
+  // this request. Informational — callers can use it to implement backoff.
+  // Note: "approximate" because multiple instances share state asynchronously.
+  int64 remaining = 2;
+
+  // reason is a human-readable explanation when allowed=false.
+  // Empty when allowed=true.
+  string reason = 3;
+}
