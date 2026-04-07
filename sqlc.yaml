@@ -1,0 +1,22 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "db/schema.sql"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_exact_table_names: false
+        overrides:
+          # Map PostgreSQL's NUMERIC to float64 — matches the bucket's internal type.
+          - db_type: "pg_catalog.numeric"
+            go_type: "float64"
+          # Map TIMESTAMPTZ to time.Time — cleaner than pgtype.Timestamptz in application code.
+          - db_type: "pg_catalog.timestamptz"
+            go_type:
+              import: "time"
+              type: "Time"

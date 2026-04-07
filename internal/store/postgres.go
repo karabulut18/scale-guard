@@ -3,136 +3,106 @@ package store
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/karabulut18/scale-guard/internal/db"
 )
 
-// PostgreSQL implements the Store interface using pgx (high-performance PostgreSQL driver).
+// PostgreSQL implements the Store interface using sqlc-generated queries over pgx/v5.
+//
+// The architecture is two layers:
+//   - internal/db  — sqlc-generated, owns the raw SQL strings and scanning logic.
+//     Never touch these files manually.
+//   - internal/store — this file. Adapts sqlc's generated types to the Store
+//     interface types used by the rest of the application.
 type PostgreSQL struct {
-	conn *pgx.Conn
+	conn    *pgx.Conn
+	queries *db.Queries
 }
 
 // NewPostgreSQL opens a connection to PostgreSQL and returns a store.
 func NewPostgreSQL(ctx context.Context, dsn string) (*PostgreSQL, error) {
 	conn, err := pgx.Connect(ctx, dsn)
 	if err != nil {
-		return nil, fmt.Errorf("pgx.Connect failed: %w", err)
+		return nil, fmt.Errorf("pgx.Connect: %w", err)
 	}
-
-	// Test the connection with a simple ping.
 	if err := conn.Ping(ctx); err != nil {
 		conn.Close(ctx)
-		return nil, fmt.Errorf("pgx.Ping failed: %w", err)
+		return nil, fmt.Errorf("pgx.Ping: %w", err)
 	}
-
-	return &PostgreSQL{conn: conn}, nil
+	return &PostgreSQL{
+		conn:    conn,
+		queries: db.New(conn),
+	}, nil
 }
 
-// LoadConfigs loads all active rate-limit configurations for a tenant from the database.
-// This query is run once at startup and every 30 seconds by the config-watcher goroutine.
-//
-// The query selects from rate_limit_configs where is_active=TRUE, ordered by client_id
-// for deterministic ordering (helps with testing and debugging).
+// LoadConfigs loads all active rate-limit configurations for a tenant.
 func (ps *PostgreSQL) LoadConfigs(ctx context.Context, tenantID string) ([]*ClientConfig, error) {
-	query := `
-		SELECT tenant_id, client_id, capacity, refill_rate
-		FROM   rate_limit_configs
-		WHERE  tenant_id = $1 AND is_active = TRUE
-		ORDER BY client_id
-	`
-
-	rows, err := ps.conn.Query(ctx, query, tenantID)
+	rows, err := ps.queries.LoadConfigs(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+		return nil, fmt.Errorf("LoadConfigs: %w", err)
 	}
-	defer rows.Close()
 
-	var configs []*ClientConfig
-	for rows.Next() {
-		var cfg ClientConfig
-		if err := rows.Scan(&cfg.TenantID, &cfg.ClientID, &cfg.Capacity, &cfg.RefillRate); err != nil {
-			return nil, fmt.Errorf("scan failed: %w", err)
+	configs := make([]*ClientConfig, len(rows))
+	for i, r := range rows {
+		configs[i] = &ClientConfig{
+			TenantID:   r.TenantID,
+			ClientID:   r.ClientID,
+			Capacity:   r.Capacity,
+			RefillRate: r.RefillRate,
 		}
-		configs = append(configs, &cfg)
 	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows iteration failed: %w", err)
-	}
-
 	return configs, nil
 }
 
-// LoadBucketStates loads the persisted token counts and refill timestamps for all
-// clients of a tenant. Used once at startup for state restoration.
+// LoadBucketStates loads persisted token counts for all clients of a tenant.
 func (ps *PostgreSQL) LoadBucketStates(ctx context.Context, tenantID string) ([]*BucketState, error) {
-	query := `
-		SELECT tenant_id, client_id, tokens, last_refill_at
-		FROM   bucket_states
-		WHERE  tenant_id = $1
-		ORDER  BY client_id
-	`
-
-	rows, err := ps.conn.Query(ctx, query, tenantID)
+	rows, err := ps.queries.LoadBucketStates(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("query failed: %w", err)
+		return nil, fmt.Errorf("LoadBucketStates: %w", err)
 	}
-	defer rows.Close()
 
-	var states []*BucketState
-	for rows.Next() {
-		var s BucketState
-		if err := rows.Scan(&s.TenantID, &s.ClientID, &s.Tokens, &s.LastRefillAt); err != nil {
-			return nil, fmt.Errorf("scan failed: %w", err)
+	states := make([]*BucketState, len(rows))
+	for i, r := range rows {
+		states[i] = &BucketState{
+			TenantID:     r.TenantID,
+			ClientID:     r.ClientID,
+			Tokens:       r.Tokens,
+			LastRefillAt: r.LastRefillAt.Time, // pgtype.Timestamptz → time.Time
 		}
-		states = append(states, &s)
 	}
-
-	return states, rows.Err()
+	return states, nil
 }
 
-// SaveBucketState upserts a batch of bucket states to the database in a single batch operation.
-// This is called every 100ms by the write-behind flusher.
-//
-// The query uses PostgreSQL's ON CONFLICT ... DO UPDATE pattern to handle both inserts
-// (first write for a client) and updates (subsequent flushes) without a separate branch in code.
-// This is much faster than checking existence first.
-//
-// IMPORTANT: This is not on the hot path. It's called by a background goroutine.
-// Latency here doesn't directly affect request latency, as long as the flusher doesn't
-// fall behind (which would indicate a DB problem or load spike).
+// SaveBucketState upserts a batch of bucket states using sqlc's generated batch API.
+// The entire batch is sent to PostgreSQL in a single round-trip.
 func (ps *PostgreSQL) SaveBucketState(ctx context.Context, states []*BucketState) error {
 	if len(states) == 0 {
-		return nil // no-op if empty
+		return nil
 	}
 
-	// Use a batch to send multiple UPSERTs in one round-trip.
-	batch := &pgx.Batch{}
-
-	for _, state := range states {
-		query := `
-			INSERT INTO bucket_states (tenant_id, client_id, tokens, last_refill_at)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (tenant_id, client_id)
-			DO UPDATE SET
-				tokens         = EXCLUDED.tokens,
-				last_refill_at = EXCLUDED.last_refill_at,
-				updated_at     = NOW()
-		`
-		batch.Queue(query, state.TenantID, state.ClientID, state.Tokens, state.LastRefillAt)
-	}
-
-	results := ps.conn.SendBatch(ctx, batch)
-	defer results.Close()
-
-	// Iterate through results to catch any errors from individual UPSERTs.
-	for i := range states {
-		if _, err := results.Exec(); err != nil {
-			return fmt.Errorf("upsert %d failed: %w", i, err)
+	params := make([]db.UpsertBucketStateParams, len(states))
+	for i, s := range states {
+		params[i] = db.UpsertBucketStateParams{
+			TenantID:     s.TenantID,
+			ClientID:     s.ClientID,
+			Tokens:       s.Tokens,
+			LastRefillAt: timestamptz(s.LastRefillAt),
 		}
 	}
 
-	return nil
+	var batchErr error
+	results := ps.queries.UpsertBucketState(ctx, params)
+	results.Exec(func(i int, err error) {
+		if err != nil && batchErr == nil {
+			batchErr = fmt.Errorf("upsert[%d] %s/%s: %w", i, states[i].TenantID, states[i].ClientID, err)
+		}
+	})
+
+	return batchErr
 }
 
 // Health checks the database connection is alive.
@@ -140,30 +110,28 @@ func (ps *PostgreSQL) Health(ctx context.Context) error {
 	return ps.conn.Ping(ctx)
 }
 
-// Close closes the database connection.
+// Close closes the underlying connection.
 func (ps *PostgreSQL) Close() error {
 	return ps.conn.Close(context.Background())
 }
 
-// Ensure PostgreSQL implements the Store interface at compile time.
+// Compile-time proof that PostgreSQL satisfies the Store interface.
 var _ Store = (*PostgreSQL)(nil)
 
-// PostgreSQL specific helpers for testing.
+// timestamptz converts time.Time to the pgtype.Timestamptz that sqlc expects
+// for TIMESTAMPTZ parameters in the generated batch API.
+func timestamptz(t time.Time) pgtype.Timestamptz {
+	return pgtype.Timestamptz{Time: t, Valid: true}
+}
 
-// Exec is a helper for running a single query without returning rows.
-// Used in tests to set up or tear down state.
-func (ps *PostgreSQL) Exec(ctx context.Context, query string, args ...interface{}) error {
+// ── Test helpers ───────────────────────────────────────────────────────────
+// These are exported only for use by integration tests in this package.
+
+func (ps *PostgreSQL) Exec(ctx context.Context, query string, args ...any) error {
 	_, err := ps.conn.Exec(ctx, query, args...)
 	return err
 }
 
-// QueryRow is a helper for running a single query and returning one row.
-// Used in tests to verify state.
-func (ps *PostgreSQL) QueryRow(ctx context.Context, query string, args ...interface{}) pgx.Row {
+func (ps *PostgreSQL) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
 	return ps.conn.QueryRow(ctx, query, args...)
-}
-
-// Connection returns the underlying pgx.Conn for test fixtures that need direct access.
-func (ps *PostgreSQL) Connection() *pgx.Conn {
-	return ps.conn
 }

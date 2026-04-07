@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -12,6 +13,16 @@ import (
 
 	"github.com/karabulut18/scale-guard/internal/store"
 )
+
+// requireDocker skips the test if Docker is not available.
+// Integration tests that spin up a real PostgreSQL container via testcontainers
+// need Docker running. Unit tests (bucket, config, limiter) never need this.
+func requireDocker(t *testing.T) {
+	t.Helper()
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		t.Skip("Docker not available — skipping integration test")
+	}
+}
 
 // setupTestDB starts a PostgreSQL container, runs migrations, and returns the DSN.
 // The caller is responsible for calling Close() on the returned cleanup function.
@@ -134,7 +145,8 @@ func setupTestDB(t *testing.T, ctx context.Context) (string, func()) {
 
 // TestLoadConfigs: LoadConfigs should return all active configs for a tenant.
 func TestLoadConfigs(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	requireDocker(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	dsn, cleanup := setupTestDB(t, ctx)
@@ -179,7 +191,8 @@ func TestLoadConfigs(t *testing.T) {
 
 // TestSaveBucketState: SaveBucketState should upsert states correctly.
 func TestSaveBucketState(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	requireDocker(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	dsn, cleanup := setupTestDB(t, ctx)
@@ -252,7 +265,8 @@ func TestSaveBucketState(t *testing.T) {
 
 // TestHealth: Health should return nil if the database is healthy.
 func TestHealth(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	requireDocker(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
 	dsn, cleanup := setupTestDB(t, ctx)
