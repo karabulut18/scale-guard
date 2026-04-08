@@ -1,0 +1,18 @@
+# Git
+.git
+.gitignore
+
+# Test files — not needed in the build context
+**/*_test.go
+
+# Local dev artifacts
+*.env
+.env.*
+
+# Documentation
+*.md
+docs/
+
+# Helm & CI — not needed to compile the binary
+helm/
+.github/

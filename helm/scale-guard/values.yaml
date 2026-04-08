@@ -1,0 +1,35 @@
+replicaCount: 2
+
+image:
+  repository: karabulut18/scale-guard
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+service:
+  grpcPort: 50051
+  healthPort: 8080
+
+# Rate limiter tuning — maps directly to SCALE_GUARD_* env vars.
+config:
+  flushInterval: "100ms"
+  refreshInterval: "30s"
+  logLevel: "info"
+
+# Database connection. In production, use a Kubernetes Secret for the URL.
+# The chart creates a Secret from these values; override db.url via --set
+# or a values override file — never commit real credentials here.
+db:
+  url: "postgres://scaleguard:scaleguard@postgres:5432/scale_guard?sslmode=disable"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "64Mi"
+  limits:
+    cpu: "500m"
+    memory: "128Mi"
+
+# Pod disruption budget: keep at least 1 pod running during rolling updates.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

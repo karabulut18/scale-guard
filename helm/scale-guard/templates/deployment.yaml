@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: scale-guard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+            - name: health
+              containerPort: {{ .Values.service.healthPort }}
+          env:
+            - name: SCALE_GUARD_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-db
+                  key: db-url
+            - name: SCALE_GUARD_GRPC_PORT
+              value: {{ .Values.service.grpcPort | quote }}
+            - name: SCALE_GUARD_HEALTH_PORT
+              value: {{ .Values.service.healthPort | quote }}
+            - name: SCALE_GUARD_FLUSH_INTERVAL
+              value: {{ .Values.config.flushInterval | quote }}
+            - name: SCALE_GUARD_REFRESH_INTERVAL
+              value: {{ .Values.config.refreshInterval | quote }}
+            - name: SCALE_GUARD_LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+            # Unique per-pod identifier using the pod name — useful for tracing
+            # which instance is responsible for a given log line.
+            - name: SCALE_GUARD_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # Liveness: if the process deadlocks or panics, restart it.
+          livenessProbe:
+            grpc:
+              port: {{ .Values.service.grpcPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          # Readiness: only send traffic once the limiter has loaded its config from DB.
+          readinessProbe:
+            grpc:
+              port: {{ .Values.service.grpcPort }}
+            initialDelaySeconds: 3
+            periodSeconds: 5

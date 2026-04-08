@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: scaleguard
+      POSTGRES_PASSWORD: scaleguard
+      POSTGRES_DB: scale_guard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scaleguard -d scale_guard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ./db/migrations:/migrations
+    command: >
+      -path=/migrations
+      -database=postgres://scaleguard:scaleguard@postgres:5432/scale_guard?sslmode=disable
+      up
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  scale-guard:
+    build: .
+    environment:
+      SCALE_GUARD_DB_URL: postgres://scaleguard:scaleguard@postgres:5432/scale_guard?sslmode=disable
+      SCALE_GUARD_GRPC_PORT: "50051"
+      SCALE_GUARD_HEALTH_PORT: "8080"
+      SCALE_GUARD_FLUSH_INTERVAL: "100ms"
+      SCALE_GUARD_REFRESH_INTERVAL: "30s"
+      SCALE_GUARD_INSTANCE_ID: "scale-guard-1"
+      SCALE_GUARD_LOG_LEVEL: "info"
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
