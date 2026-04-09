@@ -1,0 +1,33 @@
+linters:
+  enable:
+    - errcheck       # unhandled errors
+    - gosimple       # simplifiable code
+    - govet          # go vet checks
+    - ineffassign    # assignments whose values are never used
+    - staticcheck    # static analysis
+    - unused         # unused code
+    - gofmt          # formatting
+    - misspell       # typos in comments and strings
+    - bodyclose      # unclosed HTTP response bodies
+    - noctx          # HTTP requests without context
+
+linters-settings:
+  errcheck:
+    # Ignore errors from Close() calls — the pattern defer x.Close() is
+    # idiomatic Go and checking its error is rarely meaningful.
+    ignore-return-values: "Close"
+
+issues:
+  exclude-rules:
+    # Test files are exempt from errcheck — it's fine to ignore errors
+    # in test helpers and cleanup functions.
+    - path: "_test\\.go"
+      linters:
+        - errcheck
+    # Generated files are not our code.
+    - path: "internal/db/"
+      linters:
+        - all
+    - path: "internal/pb/"
+      linters:
+        - all

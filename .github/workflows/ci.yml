@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Generate sqlc
+        run: |
+          go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+          sqlc generate
+          # Fail if generated files differ from what's committed.
+          # This catches the "forgot to run sqlc generate" mistake.
+          git diff --exit-code internal/db/
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Unit tests (with race detector)
+        run: go test -race -count=1 ./internal/bucket/... ./internal/config/... ./internal/limiter/... ./internal/grpcserver/...
+
+      - name: Integration tests (with Docker / testcontainers)
+        run: go test -race -count=1 -timeout=120s ./internal/store/...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  helm:
+    name: Helm Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint helm/scale-guard
